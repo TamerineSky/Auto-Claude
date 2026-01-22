@@ -808,11 +808,24 @@ export function registerTaskExecutionHandlers(
 
   /**
    * Check if a task is actually running (has active process)
+   *
+   * FIX: Processes are registered by specId (e.g., "001-my-feature"), but the
+   * frontend sends task.id (UUID). We must look up the task to get its specId
+   * for the process check. Without this, the lookup always fails and tasks
+   * are falsely marked as "stuck" even when actively running.
+   * See: https://github.com/AndyMik90/Auto-Claude/issues/1350
    */
   ipcMain.handle(
     IPC_CHANNELS.TASK_CHECK_RUNNING,
     async (_, taskId: string): Promise<IPCResult<boolean>> => {
-      const isRunning = agentManager.isRunning(taskId);
+      // Look up task to get specId (processes are registered by specId, not UUID)
+      const { task } = findTaskAndProject(taskId);
+
+      // Use specId for process lookup if task found, otherwise fall back to taskId
+      // This handles both UUID lookups (from frontend) and direct specId lookups
+      const lookupId = task?.specId || taskId;
+      const isRunning = agentManager.isRunning(lookupId);
+
       return { success: true, data: isRunning };
     }
   );
@@ -829,8 +842,20 @@ export function registerTaskExecutionHandlers(
     ): Promise<IPCResult<{ taskId: string; recovered: boolean; newStatus: TaskStatus; message: string; autoRestarted?: boolean }>> => {
       const targetStatus = options?.targetStatus;
       const autoRestart = options?.autoRestart ?? false;
-      // Check if task is actually running
-      const isActuallyRunning = agentManager.isRunning(taskId);
+
+      // Find task and project FIRST to get specId for accurate running check
+      // FIX: Processes are registered by specId, not UUID. We must look up the task
+      // before checking if it's running to use the correct lookup key.
+      // See: https://github.com/AndyMik90/Auto-Claude/issues/1350
+      const { task, project } = findTaskAndProject(taskId);
+
+      if (!task || !project) {
+        return { success: false, error: 'Task not found' };
+      }
+
+      // Check if task is actually running (use specId for accurate lookup)
+      const lookupId = task.specId || taskId;
+      const isActuallyRunning = agentManager.isRunning(lookupId);
 
       if (isActuallyRunning) {
         return {
@@ -843,13 +868,6 @@ export function registerTaskExecutionHandlers(
             message: 'Task is still running'
           }
         };
-      }
-
-      // Find task and project
-      const { task, project } = findTaskAndProject(taskId);
-
-      if (!task || !project) {
-        return { success: false, error: 'Task not found' };
       }
 
       // Get the spec directory - use task.specsPath if available (handles worktree vs main)
